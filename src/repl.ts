@@ -3,11 +3,11 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import chalk from 'chalk';
+import { chat, textOf, isMockMode } from './llm';
 import { decompose, synthesize } from './orchestrator';
 import { runWorkers } from './worker-runner';
-import { createDashboard } from './dashboard';
 import { WorkerState } from './types';
-import { initManifest, readManifest } from './manifest';
+import { initManifest } from './manifest';
 
 function areAllFinal(states: Map<number, WorkerState>): boolean {
   return Array.from(states.values()).every(
@@ -15,7 +15,58 @@ function areAllFinal(states: Map<number, WorkerState>): boolean {
   );
 }
 
-async function runTurn(
+// Decide if message needs workers or can be answered directly
+async function classify(message: string, model: string): Promise<'task' | 'chat'> {
+  if (isMockMode()) return 'task';
+  try {
+    const resp = await chat({
+      model,
+      max_tokens: 10,
+      temperature: 0,
+      messages: [{
+        role: 'user',
+        content: `Does this message require creating or modifying code/files? Reply only TASK or CHAT.\nMessage: "${message}"`,
+      }],
+    });
+    const answer = textOf(resp.choices[0]?.message).trim().toUpperCase();
+    return answer.startsWith('TASK') ? 'task' : 'chat';
+  } catch {
+    return 'task'; // fallback: treat as task
+  }
+}
+
+// Direct LLM answer for non-coding messages
+async function directAnswer(message: string, model: string): Promise<void> {
+  try {
+    const resp = await chat({
+      model,
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: message }],
+    });
+    const answer = textOf(resp.choices[0]?.message).trim();
+    console.log(chalk.white(answer));
+  } catch (err: any) {
+    console.log(chalk.red(`Error: ${err.message}`));
+  }
+}
+
+// Simple non-animated progress for REPL — one line per event
+function makeReplProgress(verbose: boolean) {
+  const seen = new Set<string>();
+  return (states: Map<number, WorkerState>) => {
+    if (!verbose) return;
+    for (const s of states.values()) {
+      const key = `${s.taskId}:${s.status}:${s.message}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (s.status === 'running' && s.message !== 'starting...') {
+        process.stdout.write(chalk.gray(`  [${s.taskId}] ${s.message}\n`));
+      }
+    }
+  };
+}
+
+async function runCodingTask(
   task: string,
   workDir: string,
   model: string,
@@ -23,58 +74,71 @@ async function runTurn(
   parallel: number,
   verbose: boolean
 ): Promise<void> {
-  console.log('');
-  console.log(chalk.cyan('→ Decomposing...'));
-  const subtasks = await decompose(task, model, verbose);
-  console.log(chalk.cyan(`→ Plan (${subtasks.length} subtasks):`));
-  for (const s of subtasks) {
-    const deps = s.deps.length ? chalk.gray(` [deps: ${s.deps.join(',')}]`) : '';
-    console.log(`  ${chalk.bold(`[${s.id}]`)} ${s.title} ${chalk.gray(`(${s.complexity})`)}${deps}`);
-  }
-  console.log('');
-
   const startTime = Date.now();
-  const tty = Boolean(process.stdout.isTTY);
-  const dashboard = createDashboard(task, tty, startTime);
 
-  let lastRender = 0;
-  const onUpdate = (states: Map<number, WorkerState>) => {
-    const now = Date.now();
-    if (now - lastRender >= 500 || areAllFinal(states)) {
-      lastRender = now;
-      dashboard.update(states);
-    }
-  };
+  process.stdout.write(chalk.cyan('→ Planning...'));
+  const subtasks = await decompose(task, model, verbose);
+  process.stdout.write(`\r${chalk.cyan(`→ ${subtasks.length} subtask${subtasks.length > 1 ? 's' : ''}: `)}${subtasks.map((s) => chalk.bold(s.title)).join(', ')}\n`);
 
   await initManifest(workDir, task);
 
-  const ctrl = runWorkers({ subtasks, workDir, model: workerModel, orchModel: model, parallel, verbose, onUpdate });
+  const onUpdate = makeReplProgress(verbose);
+
+  // Live status: one spinner line, overwrite in place
+  let lastStatus = '';
+  const updateStatus = (states: Map<number, WorkerState>) => {
+    onUpdate(states);
+    const running = Array.from(states.values()).filter((s) => s.status === 'running');
+    const done = Array.from(states.values()).filter((s) => s.status === 'done').length;
+    const total = states.size;
+    const names = running.map((s) => s.title).join(', ');
+    const line = `  ${chalk.cyan(`${done}/${total}`)} ${chalk.gray(names || 'waiting...')}`;
+    if (line !== lastStatus) {
+      process.stdout.write(`\r\x1b[2K${line}`);
+      lastStatus = line;
+    }
+  };
+
+  const ctrl = runWorkers({
+    subtasks,
+    workDir,
+    model: workerModel,
+    orchModel: model,
+    parallel,
+    verbose: false,
+    onUpdate: updateStatus,
+  });
   const states = await ctrl.result;
-  dashboard.update(states);
+
+  // Clear status line
+  process.stdout.write(`\r\x1b[2K`);
 
   const doneResults = Array.from(states.values())
     .filter((s) => s.status === 'done')
     .map((s) => ({ id: s.taskId, title: s.title, result: s.result || '' }));
   const errors = Array.from(states.values()).filter((s) => s.status === 'error');
 
-  console.log('');
-  if (doneResults.length > 0) {
-    const finalReport = await synthesize(task, doneResults, model);
-    dashboard.finalize(finalReport);
-  } else {
-    dashboard.finalize(chalk.red('No subtasks completed.'));
+  // Print per-task results
+  for (const s of states.values()) {
+    if (s.status === 'done') {
+      const duration = s.startedAt && s.finishedAt
+        ? chalk.gray(` +${((s.finishedAt - s.startedAt) / 1000).toFixed(1)}s`)
+        : '';
+      console.log(`  ${chalk.green('✓')} ${s.title}${duration}`);
+    } else if (s.status === 'error' && s.error !== 'dependency failed') {
+      console.log(`  ${chalk.red('✗')} ${s.title}: ${chalk.red(s.error || '')}`);
+    }
   }
 
-  if (errors.length > 0) {
-    console.log(chalk.red(`\n✗ ${errors.length} error(s):`));
-    for (const e of errors) {
-      console.log(chalk.red(`  [${e.taskId}] ${e.title}: ${e.error}`));
-    }
+  if (doneResults.length > 0) {
+    const report = await synthesize(task, doneResults, model);
+    console.log('\n' + chalk.white(report));
   }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   const tokens = Array.from(states.values()).reduce((sum, s) => sum + (s.tokens || 0), 0);
-  console.log(chalk.gray(`\n  ${doneResults.length}/${subtasks.length} done · ${elapsed}s · ${tokens.toLocaleString()} tokens`));
+  const cost = (tokens * 0.000003).toFixed(4);
+  console.log(chalk.gray(`\n  ${doneResults.length}/${subtasks.length} done · ${elapsed}s · ${tokens.toLocaleString()} tokens · ~$${cost}`));
 }
 
 export async function startRepl(opts: {
@@ -84,116 +148,93 @@ export async function startRepl(opts: {
   parallel: number;
   verbose: boolean;
 }): Promise<void> {
-  console.log(chalk.bold('\nForge') + chalk.gray(' — interactive mode'));
-  console.log(chalk.gray('Commands: /exit  /dir <path>  /files  /clear (reset board)\n'));
+  console.log(chalk.bold('\nForge') + chalk.gray(' v0.1 · interactive'));
+  console.log(chalk.gray('/exit  /dir <path>  /files  /clear\n'));
 
-  // Resolve working directory
   let workDir: string;
   if (opts.workDir) {
     workDir = path.resolve(opts.workDir);
   } else {
     const sessionId = Date.now().toString(36);
     workDir = path.join(os.tmpdir(), `forge-session-${sessionId}`);
-    console.log(chalk.gray(`Working dir: ${workDir} (new session)`));
   }
 
-  if (!fs.existsSync(workDir)) {
-    fs.mkdirSync(workDir, { recursive: true });
-  }
+  if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
 
-  console.log(chalk.cyan(`Dir: ${workDir}`));
-  console.log(chalk.gray(`Orchestrator: ${opts.model} | Worker: ${opts.workerModel} | Parallel: ${opts.parallel}`));
-
-  // Show existing files if any
+  console.log(chalk.gray(`dir: ${workDir}`));
   try {
     const entries = fs.readdirSync(workDir).filter((f) => !f.startsWith('.'));
     if (entries.length > 0) {
-      console.log(chalk.gray(`\nExisting files: ${entries.slice(0, 8).join(', ')}${entries.length > 8 ? ` +${entries.length - 8} more` : ''}`));
+      console.log(chalk.gray(`files: ${entries.slice(0, 6).join(', ')}${entries.length > 6 ? ` +${entries.length - 6}` : ''}`));
     }
   } catch {}
-
   console.log('');
 
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: chalk.bold.green('You: '),
+    prompt: chalk.bold.green('> '),
     terminal: true,
   });
 
   rl.prompt();
 
+  let busy = false;
+
   rl.on('line', async (line) => {
     const input = line.trim();
-    if (!input) {
-      rl.prompt();
-      return;
-    }
+    if (!input) { rl.prompt(); return; }
+    if (busy) return;
 
-    // Special commands
+    // Slash commands
     if (input === '/exit' || input === 'exit' || input === 'quit') {
-      console.log(chalk.gray('\nBye.'));
-      rl.close();
+      console.log(chalk.gray('bye'));
       process.exit(0);
     }
-
     if (input.startsWith('/dir ')) {
-      const newDir = path.resolve(input.slice(5).trim());
-      if (!fs.existsSync(newDir)) {
-        try {
-          fs.mkdirSync(newDir, { recursive: true });
-        } catch {
-          console.log(chalk.red(`Cannot create: ${newDir}`));
-          rl.prompt();
-          return;
-        }
-      }
-      workDir = newDir;
-      console.log(chalk.cyan(`Dir → ${workDir}`));
+      workDir = path.resolve(input.slice(5).trim());
+      if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
+      console.log(chalk.gray(`dir → ${workDir}`));
       rl.prompt();
       return;
     }
-
     if (input === '/files') {
-      try {
-        const entries = fs.readdirSync(workDir);
-        if (entries.length === 0) {
-          console.log(chalk.gray('(no files yet)'));
-        } else {
-          for (const e of entries.filter((f) => !f.startsWith('.'))) {
-            console.log(chalk.gray(`  ${e}`));
-          }
-        }
-      } catch (err: any) {
-        console.log(chalk.red(err.message));
-      }
+      const entries = fs.readdirSync(workDir).filter((f) => !f.startsWith('.'));
+      if (entries.length === 0) console.log(chalk.gray('(empty)'));
+      else entries.forEach((e) => console.log(chalk.gray(`  ${e}`)));
       rl.prompt();
       return;
     }
-
     if (input === '/clear') {
-      const boardFile = path.join(workDir, '.forge-board.json');
-      try { fs.unlinkSync(boardFile); } catch {}
-      console.log(chalk.gray('Board cleared.'));
+      try { fs.unlinkSync(path.join(workDir, '.forge-board.json')); } catch {}
+      console.log(chalk.gray('board cleared'));
       rl.prompt();
       return;
     }
 
-    // Pause readline while running so dashboard renders cleanly
+    busy = true;
     rl.pause();
 
     try {
-      await runTurn(input, workDir, opts.model, opts.workerModel, opts.parallel, opts.verbose);
+      // Route: chat message or coding task?
+      process.stdout.write(chalk.gray('...'));
+      const kind = await classify(input, opts.model);
+      process.stdout.write('\r\x1b[2K');
+
+      if (kind === 'chat') {
+        await directAnswer(input, opts.model);
+      } else {
+        await runCodingTask(input, workDir, opts.model, opts.workerModel, opts.parallel, opts.verbose);
+      }
     } catch (err: any) {
-      console.error(chalk.red(`\nError: ${err.message}`));
+      console.error(chalk.red(`\nerror: ${err.message}`));
     }
 
     console.log('');
+    busy = false;
     rl.resume();
     rl.prompt();
   });
 
-  rl.on('close', () => {
-    process.exit(0);
-  });
+  rl.on('close', () => process.exit(0));
 }
