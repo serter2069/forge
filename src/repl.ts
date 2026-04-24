@@ -173,8 +173,7 @@ export async function startRepl(opts: {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: chalk.bold.green('> '),
-    terminal: true,
+    prompt: '> ',
   });
 
   rl.prompt();
