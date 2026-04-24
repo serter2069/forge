@@ -9,7 +9,7 @@ import { postMessage, readMessages } from './board';
 const execAsync = promisify(exec);
 
 const BASH_TIMEOUT_MS = 30_000;
-const MAX_OUTPUT_CHARS = 8000;
+const MAX_OUTPUT_CHARS = 100_000;
 
 function truncate(s: string, max = MAX_OUTPUT_CHARS): string {
   if (s.length <= max) return s;
