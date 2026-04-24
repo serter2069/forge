@@ -119,7 +119,7 @@ async function runWorker(args: RunArgs): Promise<void> {
 
       const resp = await chat({
         model,
-        max_tokens: 2048,
+        max_tokens: 8192,
         messages,
         tools: TOOL_DEFINITIONS,
       });
