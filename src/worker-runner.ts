@@ -2,7 +2,7 @@ import { fork, ChildProcess } from 'child_process';
 import * as path from 'path';
 import { Subtask, WorkerState } from './types';
 import { WorkerMessage, RunnerMessage } from './protocol';
-import { decompose, synthesize } from './orchestrator';
+import { decompose } from './orchestrator';
 
 const WORKER_TIMEOUT_MS = 15 * 60 * 1000; // 15min — enough for nested spawn_agent calls
 
@@ -28,8 +28,8 @@ async function runSubAgent(cfg: RunnerConfig, task: string, parallel: number): P
     const states = await runWorkers(subCfg);
     const done = Array.from(states.values()).filter((s) => s.status === 'done');
     if (done.length === 0) return '[sub-agent: all tasks failed]';
-    const results = done.map((s) => `[${s.title}]: ${s.result}`).join('\n');
-    return await synthesize(task, done.map(s => ({ id: s.taskId, title: s.title, result: s.result || '' })), cfg.orchModel);
+    // Return raw results — no synthesis LLM call (would add latency that triggers timeout)
+    return done.map((s) => `[${s.title}]: ${s.result}`).join('\n');
   } catch (err: any) {
     return `[sub-agent error: ${err.message}]`;
   }
