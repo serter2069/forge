@@ -335,7 +335,7 @@ export async function runConductorTurn(
 
     // Execute each tool call and append tool results
     for (const tc of toolCalls) {
-      const result = handleToolCall(
+      const result = await handleToolCall(
         session,
         tc.function.name,
         tc.function.arguments,
