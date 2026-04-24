@@ -2,19 +2,20 @@ import { chat, isMockMode, textOf } from './llm';
 import { Subtask } from './types';
 
 const DECOMPOSE_PROMPT = (task: string) => `You are a task planner for a parallel coding agent system.
-Break down this coding task into 4-12 atomic subtasks that maximize parallel execution.
+Analyze this task and decide the right number of subtasks. Use your judgment.
 
 Task: ${task}
 
 Rules:
-- SPLIT aggressively: one file = one subtask whenever possible
+- Simple task (1 file, 1 concern, trivial change) → return exactly 1 subtask
+- Medium task (2-4 files) → 2-4 subtasks
+- Large task (full feature, API + DB + tests + docs) → 5-12 subtasks
+- NEVER split artificially just to have more tasks
 - Maximize parallelism: independent tasks MUST have deps: []
 - Only set deps when there is a real hard dependency (file B imports file A)
-- Each subtask handles ONE concern: one module, one route file, one test file, one config
+- Each subtask handles ONE concern: one module, one route, one test file
 - description must be fully self-contained — enough for an agent with no prior context
-- Subtask titles must be specific file names (e.g. "Create routes/users.js", not "Task 1")
-- For large systems: split into data layer, route handlers, server entry, tests, docs — all parallel where possible
-- Minimum 4 subtasks even for simple tasks (setup, implement, test, docs)
+- Subtask titles must be specific file names (e.g. "Create routes/users.js")
 
 Return ONLY a JSON array with this exact schema, no other text:
 [
@@ -59,9 +60,7 @@ function validateSubtasks(arr: any[]): Subtask[] {
 
 export function mockDecompose(task: string): Subtask[] {
   return [
-    { id: 1, title: 'Setup project', description: `Initialize project structure for: ${task}`, deps: [], complexity: 'low' },
-    { id: 2, title: 'Implement core', description: `Implement the main functionality for: ${task}`, deps: [1], complexity: 'medium' },
-    { id: 3, title: 'Add tests', description: 'Add basic tests or verification script.', deps: [2], complexity: 'low' },
+    { id: 1, title: task.slice(0, 60), description: task, deps: [], complexity: 'medium' },
   ];
 }
 
