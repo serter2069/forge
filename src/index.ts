@@ -147,10 +147,36 @@ async function main() {
     .option('--verbose', 'verbose output', false)
     .action(async (taskArgs: string[], opts: any) => {
       if (!taskArgs || taskArgs.length === 0) {
-        program.help();
+        const { startRepl } = await import('./repl');
+        await startRepl({
+          workDir: opts.dir !== process.cwd() ? opts.dir : undefined,
+          model: opts.model,
+          workerModel: opts.workerModel,
+          parallel: Math.max(1, parseInt(String(opts.parallel), 10) || 4),
+          verbose: Boolean(opts.verbose),
+        });
         return;
       }
       await runTaskMode(opts, taskArgs);
+    });
+
+  program
+    .command('chat')
+    .description('Interactive multi-turn mode — run multiple tasks in the same directory')
+    .option('--dir <path>', 'working directory (default: new temp dir)')
+    .option('--parallel <n>', 'max parallel workers', '3')
+    .option('--model <m>', 'orchestrator model', DEFAULT_ORCH_MODEL)
+    .option('--worker-model <m>', 'worker model', DEFAULT_WORKER_MODEL)
+    .option('--verbose', 'verbose output', false)
+    .action(async (opts) => {
+      const { startRepl } = await import('./repl');
+      await startRepl({
+        workDir: opts.dir,
+        model: opts.model,
+        workerModel: opts.workerModel,
+        parallel: Math.max(1, parseInt(String(opts.parallel), 10) || 3),
+        verbose: Boolean(opts.verbose),
+      });
     });
 
   program
