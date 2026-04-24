@@ -39,11 +39,21 @@ export async function bash(workDir: string, command: string): Promise<string> {
   }
 }
 
-export async function readFile(workDir: string, filePath: string): Promise<string> {
+export async function readFile(
+  workDir: string,
+  filePath: string,
+  offset = 0,
+  limit = MAX_OUTPUT_CHARS
+): Promise<string> {
   try {
     const abs = resolveIn(workDir, filePath);
     const content = await fs.readFile(abs, 'utf8');
-    return truncate(content);
+    const total = content.length;
+    const slice = content.slice(offset, offset + limit);
+    const remaining = total - offset - slice.length;
+    const header = offset > 0 ? `[offset=${offset}, total=${total}]\n` : '';
+    const footer = remaining > 0 ? `\n...[${remaining} more chars — use offset=${offset + slice.length} to continue]` : '';
+    return header + slice + footer;
   } catch (err: any) {
     return `[read_file error] ${err.message}`;
   }
@@ -140,10 +150,14 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Read a file. Path relative to work dir or absolute.',
+      description: 'Read a file. Path relative to work dir or absolute. For large files: use offset+limit to paginate (default limit=8000 chars). Footer shows remaining chars and the next offset to use.',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string' } },
+        properties: {
+          path: { type: 'string' },
+          offset: { type: 'number', description: 'Start reading from this char offset (default 0)' },
+          limit: { type: 'number', description: 'Max chars to return (default 8000)' },
+        },
         required: ['path'],
       },
     },
@@ -278,7 +292,12 @@ export async function runTool(
       return bash(workDir, String(input?.command ?? ''));
     case 'read_file':
     case 'readfile':
-      return readFile(workDir, String(input?.path ?? ''));
+      return readFile(
+        workDir,
+        String(input?.path ?? ''),
+        input?.offset !== undefined ? Number(input.offset) : 0,
+        input?.limit !== undefined ? Number(input.limit) : MAX_OUTPUT_CHARS
+      );
     case 'write_file':
     case 'writefile':
       return writeFile(workDir, String(input?.path ?? ''), String(input?.content ?? ''), taskId, taskTitle);
