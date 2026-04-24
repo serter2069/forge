@@ -168,14 +168,24 @@ export function runWorkers(cfg: RunnerConfig): WorkerController {
                 dep.context = `${prev}[Result from "${st.title}"]: ${msg.result}`;
               }
             }
-            break;
+            // Clean up and schedule next tasks immediately from message handler.
+            // Do NOT wait for 'exit' — the IPC message is the authoritative signal.
+            active.delete(st.id);
+            { const t = timeouts.get(st.id); if (t) { clearTimeout(t); timeouts.delete(st.id); } }
+            notify(st.id);
+            tryScheduleMore();
+            return;
           case 'error':
             state.status = 'error';
             state.error = msg.error;
             state.tokens = msg.tokens || state.tokens;
             state.finishedAt = Date.now();
             state.message = `error: ${msg.error?.slice(0, 80)}`;
-            break;
+            active.delete(st.id);
+            { const t = timeouts.get(st.id); if (t) { clearTimeout(t); timeouts.delete(st.id); } }
+            notify(st.id);
+            tryScheduleMore();
+            return;
         }
         notify(st.id);
       });
@@ -185,23 +195,19 @@ export function runWorkers(cfg: RunnerConfig): WorkerController {
       });
 
       child.on('exit', (code) => {
+        // Only fires if the worker crashed before sending done/error.
+        // If it already completed cleanly, active no longer contains this id.
+        if (!active.has(st.id)) return;
         const t = timeouts.get(st.id);
-        if (t) {
-          clearTimeout(t);
-          timeouts.delete(st.id);
-        }
+        if (t) { clearTimeout(t); timeouts.delete(st.id); }
         active.delete(st.id);
-        // setImmediate: let any pending IPC 'done'/'error' messages drain first
-        // before deciding whether the worker exited unexpectedly
-        setImmediate(() => {
-          if (state.status === 'running') {
-            state.status = 'error';
-            state.error = `worker exited with code ${code}`;
-            state.finishedAt = Date.now();
-            notify(st.id);
-          }
-          tryScheduleMore();
-        });
+        if (state.status === 'running') {
+          state.status = 'error';
+          state.error = `worker exited with code ${code}`;
+          state.finishedAt = Date.now();
+          notify(st.id);
+        }
+        tryScheduleMore();
       });
     };
 
