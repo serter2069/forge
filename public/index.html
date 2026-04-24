@@ -431,11 +431,31 @@ function renderDetail() {
         ${ws?.error ? `<div class="kv"><label>Error</label><pre>${escapeHtml(ws.error)}</pre></div>` : ''}
         ${ws?.result ? `<div class="kv"><label>Result</label><pre>${escapeHtml(ws.result)}</pre></div>` : ''}
         <div class="kv"><label>Description</label><pre>${escapeHtml(st.description)}</pre></div>
-        ${ws?.status === 'running' ? `<button class="danger" id="kill-worker">Kill worker</button>` : ''}
+        <div class="kv"><label>Files</label><div id="worker-files" style="font-size:11px;color:#7a7ea0;">loading...</div></div>
+        <div class="kv"><label>Log</label><div id="worker-log-wrap"><button class="ghost" id="show-log-btn" style="font-size:11px;padding:3px 8px;">show last 30 lines</button></div></div>
+        ${ws?.status === 'running' ? `<button class="danger" id="kill-worker" style="margin-top:8px;">Kill worker</button>` : ''}
       `;
       const killBtn = document.getElementById('kill-worker');
       if (killBtn) killBtn.addEventListener('click', async () => {
         await fetch(`/sessions/${sid}/workers/${tid}`, { method: 'DELETE' });
+      });
+      // load files async
+      fetch(`/sessions/${sid}/manifest`).then(r => r.json()).then(files => {
+        const el = document.getElementById('worker-files');
+        if (!el) return;
+        const mine = (files || []).filter(f => f.taskId === tid);
+        if (mine.length === 0) { el.textContent = 'none yet'; return; }
+        el.innerHTML = mine.map(f => `<div style="font-family:monospace">${escapeHtml(f.path)}</div>`).join('');
+      }).catch(() => {});
+      // load log on demand
+      document.getElementById('show-log-btn')?.addEventListener('click', async () => {
+        const wrap = document.getElementById('worker-log-wrap');
+        if (!wrap) return;
+        try {
+          const data = await fetch(`/sessions/${sid}/workers/${tid}/log`).then(r => r.json());
+          const lines = (data.lines || []).slice(-30).join('\n');
+          wrap.innerHTML = `<pre style="font-size:10px;max-height:180px;overflow:auto;background:#0e0e20;padding:6px;border-radius:4px;">${escapeHtml(lines || '(empty)')}</pre>`;
+        } catch { wrap.innerHTML = '<em>error loading log</em>'; }
       });
       return;
     }

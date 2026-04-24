@@ -5,3 +5,5 @@ dist/
 .env.*
 /tmp/
 worktrees/
+.forge-manifest.json
+.forge-board.json
