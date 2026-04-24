@@ -1,0 +1,221 @@
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { ToolDef } from './llm';
+
+const execAsync = promisify(exec);
+
+const BASH_TIMEOUT_MS = 30_000;
+const MAX_OUTPUT_CHARS = 8000;
+
+function truncate(s: string, max = MAX_OUTPUT_CHARS): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max) + `\n...[truncated ${s.length - max} chars]`;
+}
+
+function resolveIn(workDir: string, target: string): string {
+  return path.isAbsolute(target) ? target : path.join(workDir, target);
+}
+
+export async function bash(workDir: string, command: string): Promise<string> {
+  try {
+    const { stdout, stderr } = await execAsync(command, {
+      cwd: workDir,
+      timeout: BASH_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+      shell: '/bin/bash',
+    });
+    const combined = (stdout || '') + (stderr ? `\n[stderr]\n${stderr}` : '');
+    return truncate(combined || '(no output)');
+  } catch (err: any) {
+    const out = (err.stdout || '') + (err.stderr ? `\n[stderr]\n${err.stderr}` : '');
+    const msg = err.killed
+      ? `[bash killed — timeout ${BASH_TIMEOUT_MS}ms]`
+      : `[bash exit ${err.code}]`;
+    return truncate(`${msg}\n${out || err.message || ''}`);
+  }
+}
+
+export async function readFile(workDir: string, filePath: string): Promise<string> {
+  try {
+    const abs = resolveIn(workDir, filePath);
+    const content = await fs.readFile(abs, 'utf8');
+    return truncate(content);
+  } catch (err: any) {
+    return `[read_file error] ${err.message}`;
+  }
+}
+
+export async function writeFile(
+  workDir: string,
+  filePath: string,
+  content: string
+): Promise<string> {
+  try {
+    const abs = resolveIn(workDir, filePath);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, content, 'utf8');
+    return `OK: wrote ${content.length} bytes to ${abs}`;
+  } catch (err: any) {
+    return `[write_file error] ${err.message}`;
+  }
+}
+
+export async function listFiles(
+  workDir: string,
+  dir: string,
+  pattern?: string
+): Promise<string> {
+  try {
+    const abs = resolveIn(workDir, dir || '.');
+    const entries = await fs.readdir(abs, { withFileTypes: true });
+    let names = entries.map((e) => (e.isDirectory() ? e.name + '/' : e.name));
+    if (pattern) {
+      const re = new RegExp(pattern);
+      names = names.filter((n) => re.test(n));
+    }
+    return truncate(names.join('\n') || '(empty)');
+  } catch (err: any) {
+    return `[list_files error] ${err.message}`;
+  }
+}
+
+export async function searchCode(
+  workDir: string,
+  query: string,
+  dir: string
+): Promise<string> {
+  const target = resolveIn(workDir, dir || '.');
+  const escaped = query.replace(/'/g, `'\\''`);
+  const cmd = `grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist '${escaped}' '${target}' 2>/dev/null | head -50`;
+  return bash(workDir, cmd);
+}
+
+// OpenAI tool definitions (function calling)
+export const TOOL_DEFINITIONS: ToolDef[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'bash',
+      description:
+        'Execute a shell command in the working directory. Timeout 30s. Returns combined stdout+stderr.',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string', description: 'Shell command to run' },
+        },
+        required: ['command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_file',
+      description: 'Read a file. Path relative to work dir or absolute.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_file',
+      description: 'Write content to a file. Creates directories as needed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          content: { type: 'string' },
+        },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_files',
+      description: 'List files in a directory. Optional regex pattern to filter.',
+      parameters: {
+        type: 'object',
+        properties: {
+          dir: { type: 'string' },
+          pattern: { type: 'string' },
+        },
+        required: ['dir'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_code',
+      description: 'Grep-search code in directory. Returns matching lines.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          dir: { type: 'string' },
+        },
+        required: ['query', 'dir'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'finish',
+      description:
+        'Call when the task is fully complete. Provide a concise summary of what was accomplished.',
+      parameters: {
+        type: 'object',
+        properties: { summary: { type: 'string' } },
+        required: ['summary'],
+      },
+    },
+  },
+];
+
+export async function runTool(
+  workDir: string,
+  name: string,
+  input: any
+): Promise<string> {
+  // OmniRouter sometimes capitalizes tool names; normalize.
+  const n = String(name || '').toLowerCase();
+  switch (n) {
+    case 'bash':
+      return bash(workDir, String(input?.command ?? ''));
+    case 'read_file':
+    case 'readfile':
+      return readFile(workDir, String(input?.path ?? ''));
+    case 'write_file':
+    case 'writefile':
+      return writeFile(
+        workDir,
+        String(input?.path ?? ''),
+        String(input?.content ?? '')
+      );
+    case 'list_files':
+    case 'listfiles':
+      return listFiles(workDir, String(input?.dir ?? '.'), input?.pattern);
+    case 'search_code':
+    case 'searchcode':
+      return searchCode(
+        workDir,
+        String(input?.query ?? ''),
+        String(input?.dir ?? '.')
+      );
+    default:
+      return `[unknown tool: ${name}]`;
+  }
+}
+
+export function isFinishTool(name: string): boolean {
+  return String(name || '').toLowerCase() === 'finish';
+}
