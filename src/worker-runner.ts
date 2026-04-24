@@ -191,13 +191,17 @@ export function runWorkers(cfg: RunnerConfig): WorkerController {
           timeouts.delete(st.id);
         }
         active.delete(st.id);
-        if (state.status === 'running') {
-          state.status = 'error';
-          state.error = `worker exited with code ${code}`;
-          state.finishedAt = Date.now();
-          notify(st.id);
-        }
-        tryScheduleMore();
+        // setImmediate: let any pending IPC 'done'/'error' messages drain first
+        // before deciding whether the worker exited unexpectedly
+        setImmediate(() => {
+          if (state.status === 'running') {
+            state.status = 'error';
+            state.error = `worker exited with code ${code}`;
+            state.finishedAt = Date.now();
+            notify(st.id);
+          }
+          tryScheduleMore();
+        });
       });
     };
 
