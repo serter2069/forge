@@ -76,9 +76,14 @@ async function runCodingTask(
 ): Promise<void> {
   const startTime = Date.now();
 
-  process.stdout.write(chalk.cyan('→ Planning...'));
+  const planFrames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+  let pfi = 0;
+  const planSpinner = setInterval(() => {
+    process.stdout.write(`\r${chalk.gray(planFrames[pfi++ % planFrames.length])} ${chalk.cyan('planning...')}`);
+  }, 80);
   const subtasks = await decompose(task, model, verbose);
-  process.stdout.write(`\r${chalk.cyan(`→ ${subtasks.length} subtask${subtasks.length > 1 ? 's' : ''}: `)}${subtasks.map((s) => chalk.bold(s.title)).join(', ')}\n`);
+  clearInterval(planSpinner);
+  process.stdout.write(`\r\x1b[2K${chalk.cyan(`→ ${subtasks.length} task${subtasks.length > 1 ? 's' : ''}: `)}${subtasks.map((s) => chalk.bold(s.title)).join(', ')}\n`);
 
   await initManifest(workDir, task);
 
@@ -215,9 +220,15 @@ export async function startRepl(opts: {
     rl.pause();
 
     try {
-      // Route: chat message or coding task?
-      process.stdout.write(chalk.gray('...'));
+      // Spinner while classifying
+      const frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+      let fi = 0;
+      const spinner = setInterval(() => {
+        process.stdout.write(`\r${chalk.gray(frames[fi++ % frames.length])}`);
+      }, 80);
+
       const kind = await classify(input, opts.model);
+      clearInterval(spinner);
       process.stdout.write('\r\x1b[2K');
 
       if (kind === 'chat') {

@@ -94,14 +94,21 @@ export async function chat(req: ChatRequest): Promise<ChatResponse> {
       const delay = Math.min(2000 * 2 ** (attempt - 1), 30000);
       await sleep(delay);
     }
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${getApiKey()}`,
-      },
-      body: JSON.stringify(req),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${getApiKey()}`,
+        },
+        body: JSON.stringify(req),
+      });
+    } catch (fetchErr: any) {
+      // Network error (ECONNREFUSED, timeout, etc.) — always retry
+      lastErr = new Error(`LLM unreachable: ${fetchErr.message}`);
+      continue;
+    }
 
     if (resp.ok) return (await resp.json()) as ChatResponse;
 
