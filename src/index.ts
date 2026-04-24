@@ -15,28 +15,7 @@ const DEFAULT_ORCH_MODEL =
 const DEFAULT_WORKER_MODEL =
   process.env.FORGE_WORKER_MODEL || 'cliproxyapi/claude-haiku-4-5-20251001';
 
-async function main() {
-  const program = new Command();
-  program
-    .name('forge')
-    .description('Multi-agent CLI coding agent with parallel orchestration')
-    .argument('[task...]', 'task description')
-    .option('--parallel <n>', 'max parallel workers', '3')
-    .option('--model <m>', 'orchestrator model', DEFAULT_ORCH_MODEL)
-    .option('--worker-model <m>', 'worker model', DEFAULT_WORKER_MODEL)
-    .option('--dir <path>', 'working directory', process.cwd())
-    .option('--dry-run', 'show plan without executing', false)
-    .option('--verbose', 'verbose output', false)
-    .parse(process.argv);
-
-  const opts = program.opts();
-  const args = program.args;
-
-  if (args.length === 0) {
-    program.help();
-    return;
-  }
-
+async function runTaskMode(opts: any, args: string[]) {
   const task = args.join(' ');
   const workDir = path.resolve(String(opts.dir));
   const parallel = Math.max(1, parseInt(String(opts.parallel), 10) || 4);
@@ -90,7 +69,7 @@ async function main() {
 
   await initManifest(workDir, task);
 
-  let states = await runWorkers({
+  const ctrl = runWorkers({
     subtasks,
     workDir,
     model: workerModel,
@@ -99,6 +78,7 @@ async function main() {
     verbose,
     onUpdate,
   });
+  let states = await ctrl.result;
 
   // Re-plan: if some tasks failed but some succeeded, retry the failures
   const failedFirst = Array.from(states.values()).filter((s) => s.status === 'error' && s.error !== 'dependency failed');
@@ -110,7 +90,7 @@ async function main() {
     const replanTask = `${task}\n\nAlready done: ${doneCtx}\nRe-do only: ${failCtx}`;
     try {
       const retrySubtasks = await decompose(replanTask, model, verbose);
-      const retryStates = await runWorkers({
+      const retryCtrl = runWorkers({
         subtasks: retrySubtasks,
         workDir,
         model: workerModel,
@@ -119,6 +99,7 @@ async function main() {
         verbose,
         onUpdate,
       });
+      const retryStates = await retryCtrl.result;
       retryStates.forEach((v, k) => states.set(k + 1000, v));
     } catch (e: any) {
       console.error(chalk.red(`Re-plan failed: ${e.message}`));
@@ -150,6 +131,44 @@ async function main() {
   }
 
   process.exit(errors.length > 0 && doneResults.length === 0 ? 1 : 0);
+}
+
+async function main() {
+  const program = new Command();
+  program
+    .name('forge')
+    .description('Multi-agent CLI coding agent with parallel orchestration')
+    .argument('[task...]', 'task description')
+    .option('--parallel <n>', 'max parallel workers', '3')
+    .option('--model <m>', 'orchestrator model', DEFAULT_ORCH_MODEL)
+    .option('--worker-model <m>', 'worker model', DEFAULT_WORKER_MODEL)
+    .option('--dir <path>', 'working directory', process.cwd())
+    .option('--dry-run', 'show plan without executing', false)
+    .option('--verbose', 'verbose output', false)
+    .action(async (taskArgs: string[], opts: any) => {
+      if (!taskArgs || taskArgs.length === 0) {
+        program.help();
+        return;
+      }
+      await runTaskMode(opts, taskArgs);
+    });
+
+  program
+    .command('serve')
+    .description('Start forge web server (Control Center)')
+    .option('--port <n>', 'port to listen on', '3600')
+    .option('--model <m>', 'orchestrator model', DEFAULT_ORCH_MODEL)
+    .option('--worker-model <m>', 'worker model', DEFAULT_WORKER_MODEL)
+    .action(async (opts) => {
+      const { startServer } = await import('./server');
+      await startServer({
+        port: parseInt(opts.port, 10),
+        orchModel: opts.model,
+        workerModel: opts.workerModel,
+      });
+    });
+
+  await program.parseAsync(process.argv);
 }
 
 function areAllFinal(states: Map<number, WorkerState>): boolean {
