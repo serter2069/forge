@@ -6,6 +6,7 @@ import { decompose, synthesize } from './orchestrator';
 import { runWorkers } from './worker-runner';
 import { createDashboard } from './dashboard';
 import { WorkerState } from './types';
+import { initManifest } from './manifest';
 
 // Defaults target OmniRouter. Kimi K2 is cheap, fast, and supports tool calls.
 // "smart" route is Claude Opus via OAuth but distorts system prompts, so avoid it for planning.
@@ -87,14 +88,42 @@ async function main() {
     }
   };
 
-  const states = await runWorkers({
+  await initManifest(workDir, task);
+
+  let states = await runWorkers({
     subtasks,
     workDir,
     model: workerModel,
+    orchModel: model,
     parallel,
     verbose,
     onUpdate,
   });
+
+  // Re-plan: if some tasks failed but some succeeded, retry the failures
+  const failedFirst = Array.from(states.values()).filter((s) => s.status === 'error' && s.error !== 'dependency failed');
+  const doneFirst = Array.from(states.values()).filter((s) => s.status === 'done');
+  if (failedFirst.length > 0 && doneFirst.length > 0) {
+    console.log(chalk.yellow(`\n→ Re-planning: ${failedFirst.length} failed task(s)...`));
+    const doneCtx = doneFirst.map((s) => `"${s.title}": ${s.result}`).join('; ');
+    const failCtx = failedFirst.map((s) => `"${s.title}": ${s.error}`).join('; ');
+    const replanTask = `${task}\n\nAlready done: ${doneCtx}\nRe-do only: ${failCtx}`;
+    try {
+      const retrySubtasks = await decompose(replanTask, model, verbose);
+      const retryStates = await runWorkers({
+        subtasks: retrySubtasks,
+        workDir,
+        model: workerModel,
+        orchModel: model,
+        parallel,
+        verbose,
+        onUpdate,
+      });
+      retryStates.forEach((v, k) => states.set(k + 1000, v));
+    } catch (e: any) {
+      console.error(chalk.red(`Re-plan failed: ${e.message}`));
+    }
+  }
   dashboard.update(states);
 
   const doneResults = Array.from(states.values())

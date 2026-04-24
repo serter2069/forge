@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { ToolDef } from './llm';
+import { registerFile, readManifest } from './manifest';
 
 const execAsync = promisify(exec);
 
@@ -50,16 +51,23 @@ export async function readFile(workDir: string, filePath: string): Promise<strin
 export async function writeFile(
   workDir: string,
   filePath: string,
-  content: string
+  content: string,
+  taskId = -1,
+  taskTitle = ''
 ): Promise<string> {
   try {
     const abs = resolveIn(workDir, filePath);
     await fs.mkdir(path.dirname(abs), { recursive: true });
     await fs.writeFile(abs, content, 'utf8');
-    return `OK: wrote ${content.length} bytes to ${abs}`;
+    if (taskId >= 0) await registerFile(workDir, filePath, taskId, taskTitle);
+    return `OK: wrote ${content.length} bytes to ${filePath}`;
   } catch (err: any) {
     return `[write_file error] ${err.message}`;
   }
+}
+
+export async function getManifest(workDir: string): Promise<string> {
+  return readManifest(workDir);
 }
 
 export async function listFiles(
@@ -169,6 +177,31 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
   {
     type: 'function',
     function: {
+      name: 'manifest',
+      description:
+        'Show the shared manifest of all files created so far by all parallel agents in this session. Use before writing to avoid conflicts.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'spawn_agent',
+      description:
+        'Spawn a sub-agent to handle a sub-task autonomously. The sub-agent runs in the same work directory, has the same tools, and returns a result. Use for complex sub-problems that can be parallelized or isolated.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: { type: 'string', description: 'Full description of the sub-task' },
+          parallel: { type: 'number', description: 'Max parallel workers for sub-agent (default 2)' },
+        },
+        required: ['task'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'finish',
       description:
         'Call when the task is fully complete. Provide a concise summary of what was accomplished.',
@@ -184,9 +217,10 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
 export async function runTool(
   workDir: string,
   name: string,
-  input: any
+  input: any,
+  taskId = -1,
+  taskTitle = ''
 ): Promise<string> {
-  // OmniRouter sometimes capitalizes tool names; normalize.
   const n = String(name || '').toLowerCase();
   switch (n) {
     case 'bash':
@@ -196,21 +230,15 @@ export async function runTool(
       return readFile(workDir, String(input?.path ?? ''));
     case 'write_file':
     case 'writefile':
-      return writeFile(
-        workDir,
-        String(input?.path ?? ''),
-        String(input?.content ?? '')
-      );
+      return writeFile(workDir, String(input?.path ?? ''), String(input?.content ?? ''), taskId, taskTitle);
     case 'list_files':
     case 'listfiles':
       return listFiles(workDir, String(input?.dir ?? '.'), input?.pattern);
     case 'search_code':
     case 'searchcode':
-      return searchCode(
-        workDir,
-        String(input?.query ?? ''),
-        String(input?.dir ?? '.')
-      );
+      return searchCode(workDir, String(input?.query ?? ''), String(input?.dir ?? '.'));
+    case 'manifest':
+      return getManifest(workDir);
     default:
       return `[unknown tool: ${name}]`;
   }

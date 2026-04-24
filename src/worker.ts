@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { chat, ChatMessage, ToolCall, textOf } from './llm';
 import { TOOL_DEFINITIONS, runTool, isFinishTool } from './tools';
-import { WorkerMessage } from './protocol';
+import { WorkerMessage, RunnerMessage } from './protocol';
 import { Subtask } from './types';
 
 const LOG_DIR = '/tmp/forge-logs';
@@ -12,6 +12,35 @@ try {
 
 function send(msg: WorkerMessage) {
   if (process.send) process.send(msg);
+}
+
+// Pending spawn_agent requests: requestId → resolve(result)
+const pendingAgentRequests = new Map<string, (result: string) => void>();
+
+process.on('message', (raw: unknown) => {
+  const msg = raw as RunnerMessage;
+  if (msg?.type === 'agent_result') {
+    const resolve = pendingAgentRequests.get(msg.requestId);
+    if (resolve) {
+      pendingAgentRequests.delete(msg.requestId);
+      resolve(msg.result);
+    }
+  }
+});
+
+function spawnSubAgent(taskId: number, task: string, parallel: number): Promise<string> {
+  return new Promise((resolve) => {
+    const requestId = `${taskId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingAgentRequests.set(requestId, resolve);
+    send({ type: 'spawn_agent', taskId, requestId, task, parallel: parallel || 2 });
+    // Timeout: 3 minutes
+    setTimeout(() => {
+      if (pendingAgentRequests.has(requestId)) {
+        pendingAgentRequests.delete(requestId);
+        resolve('[spawn_agent timeout after 3m]');
+      }
+    }, 3 * 60 * 1000);
+  });
 }
 
 function log(taskId: number, line: string) {
@@ -134,9 +163,14 @@ async function runWorker(args: RunArgs): Promise<void> {
           finished = true;
           finishSummary = String(input?.summary ?? '');
           resultText = 'OK';
+        } else if (name === 'spawn_agent') {
+          send({ type: 'tool_call', taskId, tool: 'spawn_agent', args: input });
+          send({ type: 'progress', taskId, message: `spawning sub-agent: ${String(input?.task ?? '').slice(0, 60)}...` });
+          resultText = await spawnSubAgent(taskId, String(input?.task ?? ''), Number(input?.parallel) || 2);
+          send({ type: 'tool_result', taskId, tool: 'spawn_agent', ok: true });
         } else {
           try {
-            resultText = await runTool(workDir, name, input);
+            resultText = await runTool(workDir, name, input, taskId, subtask.title);
             send({ type: 'tool_result', taskId, tool: name, ok: true });
           } catch (err: any) {
             resultText = `[tool error] ${err.message}`;

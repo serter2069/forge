@@ -1,7 +1,8 @@
 import { fork, ChildProcess } from 'child_process';
 import * as path from 'path';
 import { Subtask, WorkerState } from './types';
-import { WorkerMessage } from './protocol';
+import { WorkerMessage, RunnerMessage } from './protocol';
+import { decompose, synthesize } from './orchestrator';
 
 const WORKER_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -9,9 +10,29 @@ export interface RunnerConfig {
   subtasks: Subtask[];
   workDir: string;
   model: string;
+  orchModel: string;
   parallel: number;
   verbose: boolean;
   onUpdate: (states: Map<number, WorkerState>) => void;
+}
+
+async function runSubAgent(cfg: RunnerConfig, task: string, parallel: number): Promise<string> {
+  try {
+    const subtasks = await decompose(task, cfg.orchModel, cfg.verbose);
+    const subCfg: RunnerConfig = {
+      ...cfg,
+      subtasks,
+      parallel: Math.min(parallel, cfg.parallel),
+      onUpdate: () => {},
+    };
+    const states = await runWorkers(subCfg);
+    const done = Array.from(states.values()).filter((s) => s.status === 'done');
+    if (done.length === 0) return '[sub-agent: all tasks failed]';
+    const results = done.map((s) => `[${s.title}]: ${s.result}`).join('\n');
+    return await synthesize(task, done.map(s => ({ id: s.taskId, title: s.title, result: s.result || '' })), cfg.orchModel);
+  } catch (err: any) {
+    return `[sub-agent error: ${err.message}]`;
+  }
 }
 
 export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerState>> {
@@ -82,6 +103,18 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
       child.on('message', (raw: unknown) => {
         const msg = raw as WorkerMessage;
         if (!msg || typeof msg !== 'object') return;
+
+        // Handle spawn_agent request from worker
+        if (msg.type === 'spawn_agent') {
+          state.message = `sub-agent: ${msg.task.slice(0, 50)}...`;
+          cfg.onUpdate(states);
+          runSubAgent(cfg, msg.task, msg.parallel).then((result) => {
+            const reply: RunnerMessage = { type: 'agent_result', requestId: msg.requestId, result };
+            child.send(reply);
+          });
+          return;
+        }
+
         switch (msg.type) {
           case 'started':
             state.message = 'started';
@@ -102,7 +135,6 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
             state.tokens = msg.tokens;
             state.finishedAt = Date.now();
             state.message = 'done';
-            // inject this result as context for dependent tasks
             for (const dep of cfg.subtasks) {
               if (dep.deps.includes(st.id)) {
                 const prev = dep.context ? dep.context + '\n\n' : '';
