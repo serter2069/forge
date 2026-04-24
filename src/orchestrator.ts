@@ -72,7 +72,7 @@ export async function decompose(task: string, model: string, verbose = false): P
     try {
       const resp = await chat({
         model,
-        max_tokens: 2048,
+        max_tokens: 4096,
         temperature: 0,
         messages: [
           { role: 'user', content: DECOMPOSE_PROMPT(task) },

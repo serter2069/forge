@@ -85,6 +85,27 @@ export const CONDUCTOR_TOOLS: ToolDef[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'wait_workers',
+      description: 'Wait until specified workers finish, then return their results. Use this after spawning workers.',
+      parameters: {
+        type: 'object',
+        properties: {
+          taskIds: {
+            type: 'array',
+            items: { type: 'number' },
+            description: 'Task IDs to wait for. Omit to wait for all active workers.',
+          },
+          timeout_seconds: {
+            type: 'number',
+            description: 'Max seconds to wait (default 120)',
+          },
+        },
+      },
+    },
+  },
 ];
 
 function systemPrompt(workDir: string): string {
@@ -97,11 +118,11 @@ Your capabilities:
 - read_worker_result: get output from a finished agent
 
 Guidelines:
-- Break complex tasks into independent parallel subtasks when possible
-- Spawn workers for actual coding work, not for questions/planning
-- Check worker status before reporting completion
-- Be concise. Tell the user what you're doing and why.
-- When all work is done, summarize what was accomplished.`;
+- Break complex tasks into 2-4 independent parallel subtasks when possible
+- Spawn all workers first, then call wait_workers to wait for them all
+- After wait_workers returns, summarize what was accomplished and reply to the user
+- Be concise. Tell the user what you started before waiting.
+- Never call list_workers in a loop — use wait_workers instead.`;
 }
 
 function serializeWorker(s: WorkerState) {
@@ -189,12 +210,12 @@ function spawnConductorWorker(
   return taskId;
 }
 
-function handleToolCall(
+async function handleToolCall(
   session: ConductorSession,
   name: string,
   argsJson: string,
   onEvent: (event: any) => void
-): string {
+): Promise<string> {
   let args: any = {};
   try { args = JSON.parse(argsJson || '{}'); } catch { /* ignore */ }
 
@@ -221,13 +242,29 @@ function handleToolCall(
         const tid = Number(args.taskId);
         const w = session.workers.get(tid);
         if (!w) return JSON.stringify({ error: 'worker not found', taskId: tid });
-        if (w.status === 'done') {
-          return JSON.stringify({ taskId: tid, status: 'done', result: w.result || '' });
-        }
-        if (w.status === 'error') {
-          return JSON.stringify({ taskId: tid, status: 'error', error: w.error || 'unknown' });
-        }
+        if (w.status === 'done') return JSON.stringify({ taskId: tid, status: 'done', result: w.result || '' });
+        if (w.status === 'error') return JSON.stringify({ taskId: tid, status: 'error', error: w.error || 'unknown' });
         return JSON.stringify({ taskId: tid, status: w.status, message: 'not done yet' });
+      }
+      case 'wait_workers': {
+        const ids: number[] = Array.isArray(args.taskIds) && args.taskIds.length > 0
+          ? args.taskIds.map(Number)
+          : Array.from(session.workerControllers.keys());
+        const timeoutMs = Number(args.timeout_seconds || 180) * 1000;
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+          const allDone = ids.every((tid) => {
+            const s = session.workers.get(tid)?.status;
+            return s === 'done' || s === 'error';
+          });
+          if (allDone) break;
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        const results = ids.map((tid) => {
+          const w = session.workers.get(tid);
+          return { taskId: tid, title: w?.title || '', status: w?.status || 'unknown', result: w?.result || null, error: w?.error || null };
+        });
+        return JSON.stringify({ workers: results });
       }
       default:
         return JSON.stringify({ error: `unknown tool: ${name}` });
@@ -237,7 +274,7 @@ function handleToolCall(
   }
 }
 
-const MAX_ROUNDS = 8;
+const MAX_ROUNDS = 16;
 
 /**
  * Run one conversational turn: user message -> LLM loop (with tools) -> assistant text.
