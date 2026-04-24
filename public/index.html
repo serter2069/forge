@@ -6,89 +6,102 @@
 <title>Forge Control Center</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.29.2/cytoscape.min.js"></script>
 <style>
+  /* Warm beige / sand palette */
+  :root {
+    --bg:       #f5f0e8;
+    --bg2:      #ede8de;
+    --bg3:      #e5dfd3;
+    --border:   #cfc8b8;
+    --text:     #2e2a22;
+    --text2:    #6b6558;
+    --text3:    #9b9488;
+    --accent:   #6c63a6;
+    --accent-h: #5a5290;
+    --danger:   #c0392b;
+    --danger-h: #a93226;
+  }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; height: 100%; background: #1a1a2e; color: #e8e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; }
-  a { color: #8ab4f8; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; }
 
   .app { display: flex; height: 100vh; }
   .sidebar {
     width: 300px; min-width: 300px;
-    background: #141424; border-right: 1px solid #2a2a44;
-    display: flex; flex-direction: column;
-    overflow: hidden;
+    background: var(--bg2); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
   }
   .sidebar header {
-    padding: 14px 16px; border-bottom: 1px solid #2a2a44;
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
     display: flex; justify-content: space-between; align-items: center;
   }
   .sidebar header h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 0.3px; }
-  .sidebar header .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #f44336; display: inline-block; margin-right: 6px; }
-  .sidebar header .status-dot.ok { background: #4caf50; }
-  .sidebar .actions { padding: 10px 14px; border-bottom: 1px solid #2a2a44; }
+  .sidebar header .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); display: inline-block; margin-right: 6px; }
+  .sidebar header .status-dot.ok { background: #3a8c4a; }
+  .sidebar .actions { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+
   button {
-    background: #2196f3; color: white; border: none; padding: 8px 12px;
+    background: var(--accent); color: #fff; border: none; padding: 8px 12px;
     border-radius: 6px; font-size: 13px; cursor: pointer; font-weight: 500;
   }
-  button:hover { background: #1e88e5; }
-  button.ghost { background: transparent; color: #aab; border: 1px solid #334; }
-  button.ghost:hover { background: #1f1f36; }
-  button.danger { background: #f44336; }
-  button.danger:hover { background: #e53935; }
+  button:hover { background: var(--accent-h); }
+  button.ghost { background: transparent; color: var(--text2); border: 1px solid var(--border); }
+  button.ghost:hover { background: var(--bg3); }
+  button.danger { background: var(--danger); }
+  button.danger:hover { background: var(--danger-h); }
 
   .session-list { flex: 1; overflow-y: auto; padding: 6px; }
   .session-item {
     padding: 10px 12px; border-radius: 6px; cursor: pointer;
     margin-bottom: 4px; border: 1px solid transparent;
   }
-  .session-item:hover { background: #1f1f36; }
-  .session-item.selected { background: #22264a; border-color: #3f4a7a; }
-  .session-item .task { font-size: 12px; line-height: 1.3; color: #d4d4e6; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .session-item .meta { margin-top: 6px; display: flex; justify-content: space-between; font-size: 10px; color: #7a7ea0; }
-  .session-item .badge { padding: 2px 6px; border-radius: 3px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-  .badge.running { background: #1e3a5f; color: #61b4ff; }
-  .badge.done { background: #1f3a1f; color: #86e986; }
-  .badge.error { background: #4a1e1e; color: #ff7a7a; }
+  .session-item:hover { background: var(--bg3); }
+  .session-item.selected { background: #e8e2f7; border-color: #b8b0dc; }
+  .session-item .task { font-size: 12px; line-height: 1.3; color: var(--text); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .session-item .meta { margin-top: 6px; display: flex; justify-content: space-between; font-size: 10px; color: var(--text2); }
+  .badge { padding: 2px 6px; border-radius: 3px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px; }
+  .badge.running { background: #dce8fa; color: #2563c4; }
+  .badge.done    { background: #d4f0da; color: #2a7a3a; }
+  .badge.error   { background: #fad8d5; color: #c0392b; }
 
   .detail {
-    border-top: 1px solid #2a2a44; padding: 12px 14px;
-    max-height: 50%; overflow-y: auto;
+    border-top: 1px solid var(--border); padding: 12px 14px;
+    max-height: 55%; overflow-y: auto; background: var(--bg2);
   }
-  .detail h3 { margin: 0 0 6px 0; font-size: 12px; color: #aab; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
-  .detail .kv { margin-bottom: 4px; font-size: 12px; }
-  .detail .kv label { color: #7a7ea0; display: inline-block; min-width: 80px; }
-  .detail pre { background: #0e0e20; padding: 8px; border-radius: 4px; font-size: 11px; overflow: auto; max-height: 200px; white-space: pre-wrap; word-wrap: break-word; }
+  .detail h3 { margin: 0 0 6px 0; font-size: 11px; color: var(--text2); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+  .detail .kv { margin-bottom: 5px; font-size: 12px; }
+  .detail .kv label { color: var(--text2); display: inline-block; min-width: 70px; font-size: 11px; }
+  .detail pre { background: var(--bg3); border: 1px solid var(--border); padding: 7px; border-radius: 4px; font-size: 10px; overflow: auto; max-height: 160px; white-space: pre-wrap; word-wrap: break-word; color: var(--text); }
 
-  .canvas { flex: 1; position: relative; background: #1a1a2e; }
+  .canvas { flex: 1; position: relative; background: var(--bg); }
   #graph { width: 100%; height: 100%; }
   .legend {
     position: absolute; top: 12px; right: 12px; z-index: 10;
-    background: rgba(20, 20, 36, 0.9); border: 1px solid #2a2a44;
-    padding: 8px 10px; border-radius: 6px; font-size: 11px;
+    background: rgba(245,240,232,0.95); border: 1px solid var(--border);
+    padding: 8px 10px; border-radius: 6px; font-size: 11px; color: var(--text2);
   }
   .legend .row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
   .legend .dot { width: 10px; height: 10px; border-radius: 50%; }
 
-  /* Modal */
   .modal-backdrop {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    position: fixed; inset: 0; background: rgba(0,0,0,0.35);
     display: flex; align-items: center; justify-content: center; z-index: 100;
   }
   .modal-backdrop.hidden { display: none; }
   .modal {
-    background: #1a1a2e; border: 1px solid #2a2a44; border-radius: 10px;
-    padding: 20px; width: 520px; max-width: 95vw;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 22px; width: 520px; max-width: 95vw; box-shadow: 0 8px 32px rgba(0,0,0,0.15);
   }
-  .modal h2 { margin: 0 0 14px 0; font-size: 15px; }
+  .modal h2 { margin: 0 0 14px 0; font-size: 15px; color: var(--text); }
   .modal textarea {
-    width: 100%; min-height: 110px; background: #0e0e20; color: #e8e8f0;
-    border: 1px solid #2a2a44; border-radius: 6px; padding: 10px;
+    width: 100%; min-height: 110px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 10px;
     font-family: inherit; font-size: 13px; resize: vertical;
   }
+  .modal textarea:focus, .modal input:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
   .modal .row { display: flex; gap: 8px; margin-top: 10px; }
-  .modal .row input { flex: 1; background: #0e0e20; color: #e8e8f0; border: 1px solid #2a2a44; border-radius: 6px; padding: 8px; font-size: 12px; }
+  .modal .row input { flex: 1; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 12px; }
   .modal .actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 8px; }
 
-  .empty { color: #666; padding: 30px 14px; text-align: center; font-size: 12px; }
+  .empty { color: var(--text3); padding: 30px 14px; text-align: center; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -140,10 +153,10 @@ const state = {
 };
 
 const COLORS = {
-  waiting: '#666',
-  running: '#2196F3',
-  done:    '#4CAF50',
-  error:   '#F44336',
+  waiting: '#a09888',
+  running: '#3d6fd4',
+  done:    '#2e8a45',
+  error:   '#c0392b',
 };
 
 // --- Cytoscape init ---
@@ -155,18 +168,18 @@ const cy = cytoscape({
       selector: 'node[nodeType = "session"]',
       style: {
         'shape': 'round-rectangle',
-        'background-color': '#22264a',
-        'border-color': '#3f4a7a',
-        'border-width': 1,
+        'background-color': '#e8e2f7',
+        'border-color': '#b8b0dc',
+        'border-width': 1.5,
         'label': 'data(label)',
-        'color': '#e8e8f0',
+        'color': '#2e2a22',
         'font-size': 11,
         'text-valign': 'center',
         'text-halign': 'center',
         'text-wrap': 'wrap',
-        'text-max-width': 140,
-        'width': 170,
-        'height': 42,
+        'text-max-width': 150,
+        'width': 180,
+        'height': 46,
       },
     },
     {
@@ -176,8 +189,8 @@ const cy = cytoscape({
         'label': 'data(label)',
         'color': '#fff',
         'font-size': 10,
-        'text-outline-color': '#000',
-        'text-outline-width': 1,
+        'text-outline-color': 'rgba(0,0,0,0.6)',
+        'text-outline-width': 1.5,
         'text-valign': 'center',
         'text-halign': 'center',
         'text-wrap': 'wrap',
@@ -199,15 +212,15 @@ const cy = cytoscape({
       selector: 'edge',
       style: {
         'width': 1.5,
-        'line-color': '#3f4a7a',
-        'target-arrow-color': '#3f4a7a',
+        'line-color': '#b8b0dc',
+        'target-arrow-color': '#b8b0dc',
         'target-arrow-shape': 'triangle',
         'curve-style': 'bezier',
       },
     },
     {
       selector: 'edge[edgeType = "session"]',
-      style: { 'line-color': '#2a2a44', 'target-arrow-color': '#2a2a44', 'line-style': 'dashed' },
+      style: { 'line-color': '#cfc8b8', 'target-arrow-color': '#cfc8b8', 'line-style': 'dashed' },
     },
   ],
   layout: { name: 'preset' },
