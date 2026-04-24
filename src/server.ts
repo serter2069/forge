@@ -234,6 +234,30 @@ export async function startServer(opts: ServerOptions): Promise<void> {
     res.json({ ok });
   });
 
+  app.get('/sessions/:id/manifest', async (req: Request, res: Response) => {
+    const s = sessions.get(req.params.id);
+    if (!s) return res.status(404).json({ error: 'not_found' });
+    const manifestPath = path.join(s.workDir, '.forge-manifest.json');
+    try {
+      const data = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+      res.json(Array.isArray(data) ? data : []);
+    } catch {
+      res.json([]);
+    }
+  });
+
+  app.get('/sessions/:id/workers/:taskId/log', async (req: Request, res: Response) => {
+    const tid = req.params.taskId;
+    const logPath = `/tmp/forge-logs/worker-${tid}.log`;
+    try {
+      const content = await fs.promises.readFile(logPath, 'utf8');
+      const lines = content.split('\n');
+      res.json({ lines: lines.slice(-100) }); // last 100 lines
+    } catch {
+      res.json({ lines: [] });
+    }
+  });
+
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
 

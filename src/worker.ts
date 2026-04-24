@@ -52,17 +52,19 @@ function log(taskId: number, line: string) {
   } catch {}
 }
 
-const WORKER_SYSTEM = (workDir: string) => `You are an autonomous coding agent executing one subtask.
+const WORKER_SYSTEM = (workDir: string) => `You are an autonomous coding agent executing one subtask in parallel with other agents.
 
 Work directory: ${workDir}
-Available tools: bash, read_file, write_file, list_files, search_code, finish
+Available tools: bash, read_file, write_file, list_files, search_code, manifest, board_read, board_post, spawn_agent, finish
 
 Instructions:
-- Start by listing existing files to understand the current state
+- Start by calling board_read() to see what other agents have already built or announced
+- Then list existing files to understand current state
 - Execute the subtask completely and correctly
 - For code files: implement the full, working version (not stubs)
 - Use bash for running commands: npm install, node, etc.
 - Paths can be relative to the work directory
+- After creating important files or defining interfaces/exports, call board_post(channel, content) to announce it to other agents (e.g. channel="api" if you built an API, channel="schema" if you defined a DB schema)
 - When done, call finish(summary) with a concise description of what you created/changed
 - On unrecoverable error (2 retries), call finish with the failure summary
 - Never ask questions — use best judgment and proceed`;

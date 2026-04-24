@@ -4,6 +4,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { ToolDef } from './llm';
 import { registerFile, readManifest } from './manifest';
+import { postMessage, readMessages } from './board';
 
 const execAsync = promisify(exec);
 
@@ -68,6 +69,24 @@ export async function writeFile(
 
 export async function getManifest(workDir: string): Promise<string> {
   return readManifest(workDir);
+}
+
+export async function boardPost(
+  workDir: string,
+  taskId: number,
+  taskTitle: string,
+  channel: string,
+  content: string
+): Promise<string> {
+  return postMessage(workDir, taskId, taskTitle, channel, content);
+}
+
+export async function boardRead(
+  workDir: string,
+  channel?: string,
+  since?: number
+): Promise<string> {
+  return readMessages(workDir, channel, since);
 }
 
 export async function listFiles(
@@ -186,6 +205,38 @@ export const TOOL_DEFINITIONS: ToolDef[] = [
   {
     type: 'function',
     function: {
+      name: 'board_post',
+      description:
+        'Post a message to the shared agent blackboard so other parallel agents can read it. Use to announce what you built, share interfaces, or coordinate. channel: e.g. "api", "schema", "general".',
+      parameters: {
+        type: 'object',
+        properties: {
+          channel: { type: 'string', description: 'Message channel (e.g. "api", "schema", "general")' },
+          content: { type: 'string', description: 'Message content — what you built, what interface/contract others should use' },
+        },
+        required: ['channel', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'board_read',
+      description:
+        'Read messages from the shared agent blackboard posted by other parallel agents. Use to learn what others built before you start, to avoid conflicts and stay in sync.',
+      parameters: {
+        type: 'object',
+        properties: {
+          channel: { type: 'string', description: 'Filter by channel (optional, omit for all channels)' },
+          since: { type: 'number', description: 'Only return messages with id > this value (optional)' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'spawn_agent',
       description:
         'Spawn a sub-agent to handle a sub-task autonomously. The sub-agent runs in the same work directory, has the same tools, and returns a result. Use for complex sub-problems that can be parallelized or isolated.',
@@ -239,6 +290,12 @@ export async function runTool(
       return searchCode(workDir, String(input?.query ?? ''), String(input?.dir ?? '.'));
     case 'manifest':
       return getManifest(workDir);
+    case 'board_post':
+    case 'boardpost':
+      return boardPost(workDir, taskId, taskTitle, String(input?.channel ?? 'general'), String(input?.content ?? ''));
+    case 'board_read':
+    case 'boardread':
+      return boardRead(workDir, input?.channel ? String(input.channel) : undefined, input?.since !== undefined ? Number(input.since) : undefined);
     default:
       return `[unknown tool: ${name}]`;
   }

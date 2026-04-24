@@ -181,11 +181,11 @@ const cy = cytoscape({
         'text-valign': 'center',
         'text-halign': 'center',
         'text-wrap': 'wrap',
-        'text-max-width': 80,
-        'width': 54,
-        'height': 54,
-        'border-color': '#fff',
-        'border-width': 1,
+        'text-max-width': 88,
+        'width': 90,
+        'height': 90,
+        'border-color': 'data(borderColor)',
+        'border-width': 'data(borderWidth)',
         'pie-size': '100%',
         'pie-1-background-color': '#ffaa00',
         'pie-1-background-size': 'data(ctxPct)',
@@ -242,10 +242,41 @@ cy.on('tap', 'node', (evt) => {
   renderSessionList();
 });
 
+// --- Pulse animation for running nodes ---
+let _pulseOn = false;
+setInterval(() => {
+  _pulseOn = !_pulseOn;
+  cy.nodes('[nodeType = "worker"]').forEach(n => {
+    if (n.data('status') === 'running') {
+      n.data('borderWidth', _pulseOn ? 4 : 1.5);
+      n.data('borderColor', '#61b4ff');
+    } else {
+      n.data('borderWidth', 1);
+      n.data('borderColor', '#fff');
+    }
+  });
+}, 700);
+
 // --- Rendering ---
 function truncate(s, n) {
   if (!s) return '';
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+
+function workerLabel(taskId, title, progress, status, message) {
+  let label = '[' + taskId + '] ' + truncate(title, 18);
+  if (status === 'running') {
+    const pct = progress > 0 ? progress + '%' : '...';
+    const act = message && message !== 'starting...' && message !== 'started' && message !== 'done'
+      ? '\n' + truncate(message.replace(/^tool: /, ''), 12)
+      : '';
+    label += '\n' + pct + act;
+  } else if (status === 'done') {
+    label += '\ndone';
+  } else if (status === 'error') {
+    label += '\nerror';
+  }
+  return label;
 }
 
 function elapsed(s) {
@@ -282,9 +313,13 @@ function rebuildGraph() {
           nodeType: 'worker',
           sessionId: sid,
           taskId: st.id,
-          label: '[' + st.id + '] ' + truncate(s.title || st.title, 20),
+          label: workerLabel(st.id, s.title || st.title, s.progress || 0, s.status, s.message),
           color: COLORS[s.status] || COLORS.waiting,
           ctxPct: Math.round(ctx * 100),
+          status: s.status,
+          progress: s.progress || 0,
+          borderWidth: 1,
+          borderColor: '#fff',
         },
       });
       // session -> worker (dashed, no arrow style diff, conceptual)
@@ -312,14 +347,15 @@ function updateWorkerNode(sessionId, taskId, workerState) {
   const key = sessionId + '/' + taskId;
   const n = cy.getElementById(key);
   if (!n || n.empty()) {
-    // node not yet in graph (plan arrived late) — rebuild
     rebuildGraph();
     return;
   }
   const ctx = Math.min(1, (workerState.tokens || 0) / 200000);
   n.data('color', COLORS[workerState.status] || COLORS.waiting);
   n.data('ctxPct', Math.round(ctx * 100));
-  n.data('label', '[' + taskId + '] ' + truncate(workerState.title, 20));
+  n.data('status', workerState.status);
+  n.data('progress', workerState.progress || 0);
+  n.data('label', workerLabel(taskId, workerState.title, workerState.progress || 0, workerState.status, workerState.message));
 }
 
 function renderSessionList() {
