@@ -102,6 +102,73 @@
   .modal .actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 8px; }
 
   .empty { color: var(--text3); padding: 30px 14px; text-align: center; font-size: 12px; }
+
+  /* Tabs */
+  .tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--bg2); }
+  .tab {
+    flex: 1; padding: 10px 12px; text-align: center; cursor: pointer;
+    font-size: 12px; font-weight: 600; color: var(--text2); border-right: 1px solid var(--border);
+    background: transparent;
+  }
+  .tab:last-child { border-right: none; }
+  .tab:hover { background: var(--bg3); color: var(--text); }
+  .tab.active { background: var(--bg); color: var(--text); border-bottom: 2px solid var(--accent); }
+  .tab-content { display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+  .tab-content.hidden { display: none; }
+
+  /* Chat */
+  .chat-header {
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+    display: flex; gap: 6px; align-items: center;
+  }
+  .chat-header select {
+    flex: 1; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 5px; padding: 5px 7px; font-size: 12px;
+  }
+  .chat-header button { padding: 5px 10px; font-size: 12px; }
+
+  .chat-messages {
+    flex: 1; overflow-y: auto; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 8px;
+    background: var(--bg);
+  }
+  .msg { display: flex; max-width: 100%; }
+  .msg.user { justify-content: flex-end; }
+  .msg.assistant { justify-content: flex-start; }
+  .bubble {
+    max-width: 85%; padding: 8px 11px; font-size: 12.5px; line-height: 1.4;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .msg.user .bubble {
+    background: var(--accent); color: #fff;
+    border-radius: 12px 12px 2px 12px;
+  }
+  .msg.assistant .bubble {
+    background: var(--bg3); color: var(--text);
+    border-radius: 12px 12px 12px 2px;
+  }
+  .msg.thinking .bubble {
+    opacity: 0.6; animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 0.8; }
+  }
+
+  .chat-input-row {
+    display: flex; gap: 6px; padding: 10px 12px;
+    border-top: 1px solid var(--border); background: var(--bg2);
+  }
+  .chat-input-row textarea {
+    flex: 1; resize: none; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px;
+    font-family: inherit; font-size: 12.5px;
+  }
+  .chat-input-row textarea:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+  .chat-input-row button { align-self: flex-end; }
+  .chat-empty {
+    color: var(--text3); text-align: center; padding: 40px 14px; font-size: 12px;
+  }
 </style>
 </head>
 <body>
@@ -111,13 +178,32 @@
       <h1>Forge Control Center</h1>
       <span><span class="status-dot" id="ws-dot"></span><span id="ws-label">offline</span></span>
     </header>
-    <div class="actions">
-      <button id="new-task-btn">+ New Task</button>
+    <div class="tabs">
+      <button class="tab active" data-tab="sessions">Sessions</button>
+      <button class="tab" data-tab="chat">Chat</button>
     </div>
-    <div class="session-list" id="session-list">
-      <div class="empty">No sessions yet. Create one above.</div>
+    <div class="tab-content" id="sessions-tab">
+      <div class="actions">
+        <button id="new-task-btn">+ New Task</button>
+      </div>
+      <div class="session-list" id="session-list">
+        <div class="empty">No sessions yet. Create one above.</div>
+      </div>
+      <div class="detail" id="detail" style="display:none;"></div>
     </div>
-    <div class="detail" id="detail" style="display:none;"></div>
+    <div class="tab-content hidden" id="chat-tab">
+      <div class="chat-header">
+        <button id="new-chat-btn">+ New</button>
+        <select id="chat-session-select"></select>
+      </div>
+      <div class="chat-messages" id="chat-messages">
+        <div class="chat-empty">No chat yet. Click "+ New" to start.</div>
+      </div>
+      <div class="chat-input-row">
+        <textarea id="chat-input" placeholder="Ask the orchestrator..." rows="2"></textarea>
+        <button id="chat-send-btn">Send</button>
+      </div>
+    </div>
   </aside>
   <main class="canvas">
     <div class="legend">
@@ -145,11 +231,29 @@
   </div>
 </div>
 
+<div class="modal-backdrop hidden" id="chat-modal">
+  <div class="modal">
+    <h2>New Chat</h2>
+    <textarea id="chat-first-msg" placeholder="First message to the orchestrator..."></textarea>
+    <div class="row">
+      <input id="chat-dir-input" placeholder="Working dir (optional)" />
+    </div>
+    <div class="actions">
+      <button class="ghost" id="chat-cancel-btn">Cancel</button>
+      <button id="chat-start-btn">Start</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const state = {
   sessions: new Map(),     // id -> session
   selectedId: null,
   selectedNodeKey: null,   // "<sessionId>/<taskId>" or "<sessionId>" for root
+  conductorSessions: new Map(), // id -> conductor session
+  activeConductorId: null,
+  currentTab: 'sessions',  // 'sessions' | 'chat'
+  chatBusy: false,
 };
 
 const COLORS = {
@@ -302,6 +406,45 @@ function elapsed(s) {
 function rebuildGraph() {
   const nodes = [];
   const edges = [];
+
+  // Conductor sessions: session root + spawned workers (no deps)
+  for (const cs of state.conductorSessions.values()) {
+    const sid = cs.id;
+    const firstMsg = (cs.messages && cs.messages.length > 0) ? cs.messages[0].content : '(conductor)';
+    nodes.push({
+      data: {
+        id: sid,
+        nodeType: 'session',
+        sessionId: sid,
+        label: '[chat] ' + truncate(firstMsg, 40),
+      },
+    });
+    const workers = cs.workers || {};
+    for (const tidStr of Object.keys(workers)) {
+      const s = workers[tidStr];
+      const tid = parseInt(tidStr, 10);
+      const key = sid + '/' + tid;
+      const ctx = Math.min(1, (s.tokens || 0) / 200000);
+      nodes.push({
+        data: {
+          id: key,
+          nodeType: 'worker',
+          sessionId: sid,
+          taskId: tid,
+          label: workerLabel(tid, s.title, s.progress || 0, s.status, s.message),
+          color: COLORS[s.status] || COLORS.waiting,
+          ctxPct: Math.round(ctx * 100),
+          status: s.status,
+          progress: s.progress || 0,
+          borderWidth: 1,
+          borderColor: '#fff',
+        },
+      });
+      edges.push({
+        data: { id: sid + '~' + tid, source: sid, target: key, edgeType: 'session' },
+      });
+    }
+  }
 
   for (const session of state.sessions.values()) {
     const sid = session.id;
@@ -498,6 +641,164 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// ─────────────────────────── Tabs ───────────────────────────
+function switchTab(name) {
+  state.currentTab = name;
+  for (const btn of document.querySelectorAll('.tab')) {
+    btn.classList.toggle('active', btn.dataset.tab === name);
+  }
+  document.getElementById('sessions-tab').classList.toggle('hidden', name !== 'sessions');
+  document.getElementById('chat-tab').classList.toggle('hidden', name !== 'chat');
+  if (name === 'chat') {
+    renderChatSessions();
+    renderChatMessages();
+  }
+}
+for (const btn of document.querySelectorAll('.tab')) {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+}
+
+// ─────────────────────────── Chat Rendering ───────────────────────────
+function renderChatSessions() {
+  const sel = document.getElementById('chat-session-select');
+  if (!sel) return;
+  const arr = Array.from(state.conductorSessions.values()).sort((a, b) => b.createdAt - a.createdAt);
+  if (arr.length === 0) {
+    sel.innerHTML = '<option value="">-- no chats --</option>';
+    return;
+  }
+  sel.innerHTML = arr.map((cs) => {
+    const first = (cs.messages && cs.messages[0]) ? cs.messages[0].content : '(new)';
+    const label = truncate(first, 40) + ' · ' + new Date(cs.createdAt).toLocaleTimeString();
+    return `<option value="${cs.id}" ${state.activeConductorId === cs.id ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  }).join('');
+}
+
+function renderChatMessages() {
+  const box = document.getElementById('chat-messages');
+  if (!box) return;
+  const cs = state.conductorSessions.get(state.activeConductorId);
+  if (!cs) {
+    box.innerHTML = '<div class="chat-empty">No chat selected. Click "+ New" to start.</div>';
+    return;
+  }
+  const msgs = cs.messages || [];
+  if (msgs.length === 0 && !state.chatBusy) {
+    box.innerHTML = '<div class="chat-empty">Empty chat. Type a message below.</div>';
+    return;
+  }
+  let html = msgs.map((m) => `
+    <div class="msg ${m.role}"><div class="bubble">${escapeHtml(m.content)}</div></div>
+  `).join('');
+  if (state.chatBusy) {
+    html += `<div class="msg assistant thinking"><div class="bubble">…</div></div>`;
+  }
+  box.innerHTML = html;
+  box.scrollTop = box.scrollHeight;
+}
+
+function removeThinking() {
+  // rendered inline in renderChatMessages; clearing flag + re-render is enough
+  state.chatBusy = false;
+  renderChatMessages();
+}
+
+document.getElementById('chat-session-select').addEventListener('change', (e) => {
+  state.activeConductorId = e.target.value || null;
+  renderChatMessages();
+  rebuildGraph();
+});
+
+// New chat modal
+const chatModal = document.getElementById('chat-modal');
+document.getElementById('new-chat-btn').addEventListener('click', () => {
+  chatModal.classList.remove('hidden');
+  document.getElementById('chat-first-msg').focus();
+});
+document.getElementById('chat-cancel-btn').addEventListener('click', () => chatModal.classList.add('hidden'));
+document.getElementById('chat-start-btn').addEventListener('click', async () => {
+  const message = document.getElementById('chat-first-msg').value.trim();
+  if (!message) return;
+  const dir = document.getElementById('chat-dir-input').value.trim() || undefined;
+  state.chatBusy = true;
+  renderChatMessages();
+  chatModal.classList.add('hidden');
+  document.getElementById('chat-first-msg').value = '';
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, dir }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('Failed: ' + (err.error || res.status));
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+  } finally {
+    state.chatBusy = false;
+    renderChatMessages();
+  }
+});
+
+// Chat send
+async function sendChatMessage() {
+  const input = document.getElementById('chat-input');
+  const message = input.value.trim();
+  if (!message) return;
+  if (!state.activeConductorId) {
+    // treat as first message of a new chat
+    state.chatBusy = true;
+    renderChatMessages();
+    input.value = '';
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert('Failed: ' + (err.error || res.status));
+      }
+    } catch (e) {
+      alert('Network error: ' + e.message);
+    } finally {
+      state.chatBusy = false;
+      renderChatMessages();
+    }
+    return;
+  }
+  const id = state.activeConductorId;
+  state.chatBusy = true;
+  input.value = '';
+  renderChatMessages();
+  try {
+    const res = await fetch(`/chat/${id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert('Failed: ' + (err.error || res.status));
+    }
+  } catch (e) {
+    alert('Network error: ' + e.message);
+  } finally {
+    state.chatBusy = false;
+    renderChatMessages();
+  }
+}
+document.getElementById('chat-send-btn').addEventListener('click', sendChatMessage);
+document.getElementById('chat-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChatMessage();
+  }
+});
+
 // --- WebSocket ---
 let ws;
 function connect() {
@@ -524,9 +825,16 @@ function handleMessage(msg) {
   if (msg.type === 'snapshot') {
     state.sessions.clear();
     for (const s of msg.sessions) state.sessions.set(s.id, s);
+    state.conductorSessions.clear();
+    for (const cs of (msg.conductorSessions || [])) state.conductorSessions.set(cs.id, cs);
+    if (!state.activeConductorId && state.conductorSessions.size > 0) {
+      state.activeConductorId = state.conductorSessions.keys().next().value;
+    }
     rebuildGraph();
     renderSessionList();
     renderDetail();
+    renderChatSessions();
+    renderChatMessages();
     return;
   }
   if (msg.type === 'session_created' || msg.type === 'session_planned' || msg.type === 'session_done' || msg.type === 'session_error') {
@@ -558,6 +866,49 @@ function handleMessage(msg) {
     }
     renderSessionList();
     if (state.selectedId === msg.sessionId) renderDetail();
+    return;
+  }
+  // ─── Conductor events ───
+  if (msg.type === 'conductor_created') {
+    state.conductorSessions.set(msg.session.id, msg.session);
+    state.activeConductorId = msg.session.id;
+    renderChatSessions();
+    renderChatMessages();
+    rebuildGraph();
+    return;
+  }
+  if (msg.type === 'conductor_removed') {
+    state.conductorSessions.delete(msg.id);
+    if (state.activeConductorId === msg.id) state.activeConductorId = null;
+    renderChatSessions();
+    renderChatMessages();
+    rebuildGraph();
+    return;
+  }
+  if (msg.type === 'conductor_message') {
+    const cs = state.conductorSessions.get(msg.sessionId);
+    if (cs) {
+      if (!cs.messages) cs.messages = [];
+      cs.messages.push({ role: msg.role, content: msg.content, timestamp: msg.timestamp });
+      if (state.activeConductorId === msg.sessionId) renderChatMessages();
+    }
+    return;
+  }
+  if (msg.type === 'conductor_worker_spawned' || msg.type === 'conductor_worker_update') {
+    const cs = state.conductorSessions.get(msg.sessionId);
+    if (!cs) return;
+    if (!cs.workers) cs.workers = {};
+    if (msg.state) {
+      cs.workers[msg.state.taskId] = msg.state;
+      // Graph may not have this node yet — try update, fall back to rebuild
+      const key = msg.sessionId + '/' + msg.state.taskId;
+      const n = cy.getElementById(key);
+      if (!n || n.empty()) {
+        rebuildGraph();
+      } else {
+        updateWorkerNode(msg.sessionId, msg.state.taskId, msg.state);
+      }
+    }
     return;
   }
 }
@@ -598,6 +949,13 @@ fetch('/sessions').then((r) => r.json()).then((arr) => {
   rebuildGraph();
   renderSessionList();
 });
+fetch('/chat').then((r) => r.json()).then((arr) => {
+  for (const cs of arr) state.conductorSessions.set(cs.id, cs);
+  if (!state.activeConductorId && arr.length > 0) state.activeConductorId = arr[0].id;
+  renderChatSessions();
+  renderChatMessages();
+  rebuildGraph();
+}).catch(() => {});
 connect();
 </script>
 </body>

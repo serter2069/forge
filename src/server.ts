@@ -9,6 +9,12 @@ import { decompose, synthesize } from './orchestrator';
 import { runWorkers, WorkerController } from './worker-runner';
 import { initManifest } from './manifest';
 import { WorkerState, ForgeEvent, Subtask } from './types';
+import {
+  ConductorSession,
+  runConductorTurn,
+  serializeConductorSession,
+  killAllWorkers as killConductorWorkers,
+} from './conductor';
 
 export interface ServerOptions {
   port: number;
@@ -33,6 +39,7 @@ interface Session {
 }
 
 const sessions = new Map<string, Session>();
+const conductorSessions = new Map<string, ConductorSession>();
 const wsClients = new Set<WebSocket>();
 
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min after completion
@@ -246,6 +253,85 @@ export async function startServer(opts: ServerOptions): Promise<void> {
     }
   });
 
+  // ─────────────────────────── Conductor (Chat) ───────────────────────────
+
+  function createConductor(workDir: string, model: string, workerModel: string): ConductorSession {
+    const id = randomUUID();
+    const cs: ConductorSession = {
+      id,
+      workDir,
+      model,
+      workerModel,
+      messages: [],
+      workers: new Map(),
+      workerControllers: new Map(),
+      nextTaskId: 1,
+      status: 'active',
+      createdAt: Date.now(),
+    };
+    conductorSessions.set(id, cs);
+    broadcast({ type: 'conductor_created', session: serializeConductorSession(cs) });
+    return cs;
+  }
+
+  app.get('/chat', (_req: Request, res: Response) => {
+    res.json(Array.from(conductorSessions.values()).map(serializeConductorSession));
+  });
+
+  app.get('/chat/:id', (req: Request, res: Response) => {
+    const cs = conductorSessions.get(req.params.id);
+    if (!cs) return res.status(404).json({ error: 'not_found' });
+    res.json(serializeConductorSession(cs));
+  });
+
+  app.post('/chat', async (req: Request, res: Response) => {
+    const { message, dir, model, workerModel } = req.body || {};
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'message is required' });
+    }
+    const workDir = path.resolve(String(dir || process.cwd()));
+    if (!fs.existsSync(workDir)) {
+      try { fs.mkdirSync(workDir, { recursive: true }); }
+      catch (e: any) { return res.status(400).json({ error: `cannot create workDir: ${e.message}` }); }
+    }
+    const orchM = String(model || opts.orchModel);
+    const workerM = String(workerModel || opts.workerModel);
+
+    const cs = createConductor(workDir, orchM, workerM);
+    try {
+      const reply = await runConductorTurn(cs, message, broadcast);
+      res.json({ id: cs.id, reply });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message || err), id: cs.id });
+    }
+  });
+
+  app.post('/chat/:id/messages', async (req: Request, res: Response) => {
+    const cs = conductorSessions.get(req.params.id);
+    if (!cs) return res.status(404).json({ error: 'not_found' });
+    const { message } = req.body || {};
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({ error: 'message is required' });
+    }
+    try {
+      const reply = await runConductorTurn(cs, message, broadcast);
+      res.json({ reply });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message || err) });
+    }
+  });
+
+  app.delete('/chat/:id', (req: Request, res: Response) => {
+    const cs = conductorSessions.get(req.params.id);
+    if (!cs) return res.status(404).json({ error: 'not_found' });
+    killConductorWorkers(cs);
+    conductorSessions.delete(req.params.id);
+    broadcast({ type: 'conductor_removed', id: req.params.id });
+    res.json({ ok: true });
+  });
+
+  // ─────────────────────────── end Conductor ───────────────────────────
+
   app.get('/sessions/:id/workers/:taskId/log', async (req: Request, res: Response) => {
     const tid = req.params.taskId;
     const logPath = `/tmp/forge-logs/worker-${tid}.log`;
@@ -268,6 +354,7 @@ export async function startServer(opts: ServerOptions): Promise<void> {
       ws.send(JSON.stringify({
         type: 'snapshot',
         sessions: Array.from(sessions.values()).map(serializeSession),
+        conductorSessions: Array.from(conductorSessions.values()).map(serializeConductorSession),
       }));
     } catch { /* ignore */ }
 
