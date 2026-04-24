@@ -33,13 +33,13 @@ function spawnSubAgent(taskId: number, task: string, parallel: number): Promise<
     const requestId = `${taskId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     pendingAgentRequests.set(requestId, resolve);
     send({ type: 'spawn_agent', taskId, requestId, task, parallel: parallel || 2 });
-    // Timeout: 3 minutes
+    // Timeout: 12 minutes (sub-agent can itself be complex)
     setTimeout(() => {
       if (pendingAgentRequests.has(requestId)) {
         pendingAgentRequests.delete(requestId);
-        resolve('[spawn_agent timeout after 3m]');
+        resolve('[spawn_agent timeout after 12m]');
       }
-    }, 3 * 60 * 1000);
+    }, 12 * 60 * 1000);
   });
 }
 

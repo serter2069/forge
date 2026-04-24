@@ -4,7 +4,7 @@ import { Subtask, WorkerState } from './types';
 import { WorkerMessage, RunnerMessage } from './protocol';
 import { decompose, synthesize } from './orchestrator';
 
-const WORKER_TIMEOUT_MS = 5 * 60 * 1000;
+const WORKER_TIMEOUT_MS = 15 * 60 * 1000; // 15min — enough for nested spawn_agent calls
 
 export interface RunnerConfig {
   subtasks: Subtask[];
@@ -110,7 +110,7 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
           cfg.onUpdate(states);
           runSubAgent(cfg, msg.task, msg.parallel).then((result) => {
             const reply: RunnerMessage = { type: 'agent_result', requestId: msg.requestId, result };
-            child.send(reply);
+            try { child.send(reply); } catch { /* worker already exited */ }
           });
           return;
         }
