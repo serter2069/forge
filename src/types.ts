@@ -33,3 +33,12 @@ export interface ForgeOptions {
   dryRun: boolean;
   verbose: boolean;
 }
+
+export interface ForgeEvent {
+  type: 'worker_update' | 'session_done' | 'spawn_agent_start';
+  sessionId: string;
+  taskId?: number;
+  state?: WorkerState;
+  states?: Record<number, WorkerState>;
+  message?: string;
+}

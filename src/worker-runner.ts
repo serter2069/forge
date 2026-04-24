@@ -1,6 +1,6 @@
 import { fork, ChildProcess } from 'child_process';
 import * as path from 'path';
-import { Subtask, WorkerState } from './types';
+import { Subtask, WorkerState, ForgeEvent } from './types';
 import { WorkerMessage, RunnerMessage } from './protocol';
 import { decompose } from './orchestrator';
 
@@ -14,6 +14,13 @@ export interface RunnerConfig {
   parallel: number;
   verbose: boolean;
   onUpdate: (states: Map<number, WorkerState>) => void;
+  onEvent?: (sessionId: string, event: ForgeEvent) => void;
+  sessionId?: string;
+}
+
+export interface WorkerController {
+  result: Promise<Map<number, WorkerState>>;
+  kill(taskId: number): boolean;
 }
 
 async function runSubAgent(cfg: RunnerConfig, task: string, parallel: number): Promise<string> {
@@ -25,7 +32,8 @@ async function runSubAgent(cfg: RunnerConfig, task: string, parallel: number): P
       parallel: Math.min(parallel, cfg.parallel),
       onUpdate: () => {},
     };
-    const states = await runWorkers(subCfg);
+    const ctrl = runWorkers(subCfg);
+    const states = await ctrl.result;
     const done = Array.from(states.values()).filter((s) => s.status === 'done');
     if (done.length === 0) return '[sub-agent: all tasks failed]';
     // Return raw results — no synthesis LLM call (would add latency that triggers timeout)
@@ -35,7 +43,7 @@ async function runSubAgent(cfg: RunnerConfig, task: string, parallel: number): P
   }
 }
 
-export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerState>> {
+export function runWorkers(cfg: RunnerConfig): WorkerController {
   const states = new Map<number, WorkerState>();
   for (const st of cfg.subtasks) {
     states.set(st.id, {
@@ -54,6 +62,24 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
 
   const workerScript = path.resolve(__dirname, 'worker.js');
 
+  const emitEvent = (type: ForgeEvent['type'], taskId?: number, extra?: Partial<ForgeEvent>) => {
+    if (!cfg.onEvent || !cfg.sessionId) return;
+    const ev: ForgeEvent = {
+      type,
+      sessionId: cfg.sessionId,
+      taskId,
+      state: taskId !== undefined ? states.get(taskId) : undefined,
+      states: Object.fromEntries(states) as Record<number, WorkerState>,
+      ...extra,
+    };
+    try { cfg.onEvent(cfg.sessionId, ev); } catch { /* ignore */ }
+  };
+
+  const notify = (taskId?: number, extra?: Partial<ForgeEvent>) => {
+    cfg.onUpdate(states);
+    emitEvent('worker_update', taskId, extra);
+  };
+
   const depsSatisfied = (st: Subtask): boolean =>
     st.deps.every((d) => states.get(d)?.status === 'done');
 
@@ -65,13 +91,13 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
       (s) => s.status === 'done' || s.status === 'error'
     );
 
-  return new Promise((resolve) => {
+  const result = new Promise<Map<number, WorkerState>>((resolve) => {
     const spawnWorker = (st: Subtask) => {
       const state = states.get(st.id)!;
       state.status = 'running';
       state.startedAt = Date.now();
       state.message = 'starting...';
-      cfg.onUpdate(states);
+      notify(st.id);
 
       const arg = JSON.stringify({
         subtask: st,
@@ -95,7 +121,7 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
           child.kill('SIGKILL');
         } catch {}
         active.delete(st.id);
-        cfg.onUpdate(states);
+        notify(st.id);
         tryScheduleMore();
       }, WORKER_TIMEOUT_MS);
       timeouts.set(st.id, timeout);
@@ -107,7 +133,8 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
         // Handle spawn_agent request from worker
         if (msg.type === 'spawn_agent') {
           state.message = `sub-agent: ${msg.task.slice(0, 50)}...`;
-          cfg.onUpdate(states);
+          emitEvent('spawn_agent_start', st.id, { message: msg.task });
+          notify(st.id);
           runSubAgent(cfg, msg.task, msg.parallel).then((result) => {
             const reply: RunnerMessage = { type: 'agent_result', requestId: msg.requestId, result };
             try { child.send(reply); } catch { /* worker already exited */ }
@@ -150,7 +177,7 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
             state.message = `error: ${msg.error?.slice(0, 80)}`;
             break;
         }
-        cfg.onUpdate(states);
+        notify(st.id);
       });
 
       child.stderr?.on('data', (d) => {
@@ -168,7 +195,7 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
           state.status = 'error';
           state.error = `worker exited with code ${code}`;
           state.finishedAt = Date.now();
-          cfg.onUpdate(states);
+          notify(st.id);
         }
         tryScheduleMore();
       });
@@ -176,6 +203,7 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
 
     const tryScheduleMore = () => {
       if (allFinished()) {
+        emitEvent('session_done');
         resolve(states);
         return;
       }
@@ -187,13 +215,16 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
           state.status = 'error';
           state.error = 'dependency failed';
           state.finishedAt = Date.now();
-          cfg.onUpdate(states);
+          notify(st.id);
           continue;
         }
         if (!depsSatisfied(st)) continue;
         spawnWorker(st);
       }
-      if (allFinished()) resolve(states);
+      if (allFinished()) {
+        emitEvent('session_done');
+        resolve(states);
+      }
     };
 
     const onSigint = () => {
@@ -208,4 +239,30 @@ export async function runWorkers(cfg: RunnerConfig): Promise<Map<number, WorkerS
 
     tryScheduleMore();
   });
+
+  const kill = (taskId: number): boolean => {
+    const child = active.get(taskId);
+    if (!child) return false;
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      return false;
+    }
+    const state = states.get(taskId);
+    if (state && state.status === 'running') {
+      state.status = 'error';
+      state.error = 'killed by user';
+      state.finishedAt = Date.now();
+      notify(taskId);
+    }
+    active.delete(taskId);
+    const t = timeouts.get(taskId);
+    if (t) {
+      clearTimeout(t);
+      timeouts.delete(taskId);
+    }
+    return true;
+  };
+
+  return { result, kill };
 }
